@@ -8,8 +8,8 @@ from pydantic import BaseModel
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 DB_PATH = os.getenv("DATABASE_PATH", "easytrip.db")
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "https://marckgulyaev-art.github.io").split(",")
-app = FastAPI(title="EasyTrip API", version="0.1.0")
-app.add_middleware(CORSMiddleware, allow_origins=[x.strip() for x in ALLOWED_ORIGINS if x.strip()], allow_credentials=False, allow_methods=["GET", "POST"], allow_headers=["Content-Type", "X-Telegram-Init-Data"])
+app = FastAPI(title="EasyTrip API", version="0.2.0")
+app.add_middleware(CORSMiddleware, allow_origins=[x.strip() for x in ALLOWED_ORIGINS if x.strip()], allow_credentials=False, allow_methods=["GET", "POST", "DELETE"], allow_headers=["Content-Type", "X-Telegram-Init-Data"])
 
 def db():
     con = sqlite3.connect(DB_PATH)
@@ -20,6 +20,7 @@ def init_db():
     with db() as con:
         con.execute("CREATE TABLE IF NOT EXISTS users(telegram_id INTEGER PRIMARY KEY, first_name TEXT, last_name TEXT, username TEXT, xp INTEGER NOT NULL DEFAULT 0, trips INTEGER NOT NULL DEFAULT 0, mission INTEGER NOT NULL DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)")
         con.execute("CREATE TABLE IF NOT EXISTS visited_countries(id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_id INTEGER NOT NULL, country TEXT NOT NULL, added_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(telegram_id,country))")
+        con.execute("CREATE TABLE IF NOT EXISTS favorites(id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_id INTEGER NOT NULL, destination TEXT NOT NULL, description TEXT DEFAULT '', emoji TEXT DEFAULT '❤️', created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(telegram_id,destination))")
 @app.on_event("startup")
 def startup(): init_db()
 
@@ -50,6 +51,9 @@ def upsert_user(u):
 def user_countries(tid):
     with db() as con: return [r["country"] for r in con.execute("SELECT country FROM visited_countries WHERE telegram_id=? ORDER BY added_at",(tid,)).fetchall()]
 
+def user_favorites(tid):
+    with db() as con: return [dict(r) for r in con.execute("SELECT id,destination,description,emoji,created_at FROM favorites WHERE telegram_id=? ORDER BY created_at DESC",(tid,)).fetchall()]
+
 def level_for_xp(xp):
     levels=[("Новичок",0,"🧳"),("Турист",500,"✈️"),("Исследователь",1500,"🧭"),("Авантюрист",4000,"🎒"),("Легенда",10000,"👑")]
     current=levels[0]; nxt=levels[1]
@@ -58,13 +62,15 @@ def level_for_xp(xp):
     return {"name":current[0],"number":levels.index(current)+1,"icon":current[2],"next_xp":nxt[1] if nxt else None}
 
 class CountryPayload(BaseModel): country: str
+class FavoritePayload(BaseModel): destination: str; description: str = ""; emoji: str = "❤️"
 
 @app.get("/health")
 def health(): return {"status":"ok","service":"EasyTrip API"}
 @app.get("/api/profile")
 def profile(x_telegram_init_data: Optional[str]=Header(default=None)):
     u=telegram_user(x_telegram_init_data); user=upsert_user(u); countries=user_countries(user["telegram_id"]); xp=user["xp"]
-    return {"user":{"id":user["telegram_id"],"first_name":user["first_name"],"last_name":user["last_name"],"username":user["username"]},"xp":xp,"trips":user["trips"],"mission":user["mission"],"visited":countries,"stampList":countries,"level":level_for_xp(xp)}
+    favs=user_favorites(user["telegram_id"])
+    return {"user":{"id":user["telegram_id"],"first_name":user["first_name"],"last_name":user["last_name"],"username":user["username"]},"xp":xp,"trips":user["trips"],"mission":user["mission"],"visited":countries,"stampList":countries,"favorites":favs,"level":level_for_xp(xp)}
 @app.post("/api/countries")
 def add_country(payload: CountryPayload, x_telegram_init_data: Optional[str]=Header(default=None)):
     u=telegram_user(x_telegram_init_data); name=payload.country.strip()
@@ -84,3 +90,20 @@ def add_xp(xp: int, x_telegram_init_data: Optional[str]=Header(default=None)):
     with db() as con:
         con.execute("UPDATE users SET xp=xp+?,updated_at=CURRENT_TIMESTAMP WHERE telegram_id=?",(xp,tid)); user=con.execute("SELECT xp FROM users WHERE telegram_id=?",(tid,)).fetchone()
     return {"xp":user["xp"],"level":level_for_xp(user["xp"])}
+@app.get("/api/favorites")
+def get_favorites(x_telegram_init_data: Optional[str]=Header(default=None)):
+    u=telegram_user(x_telegram_init_data); upsert_user(u)
+    return {"favorites":user_favorites(int(u["id"]))}
+@app.post("/api/favorites")
+def add_favorite(payload: FavoritePayload, x_telegram_init_data: Optional[str]=Header(default=None)):
+    u=telegram_user(x_telegram_init_data); destination=payload.destination.strip(); description=payload.description.strip(); emoji=payload.emoji.strip() or "❤️"
+    if not destination or len(destination)>120: raise HTTPException(400,"Destination is invalid")
+    tid=int(u["id"]); upsert_user(u)
+    with db() as con:
+        cur=con.execute("INSERT OR IGNORE INTO favorites(telegram_id,destination,description,emoji) VALUES(?,?,?,?)",(tid,destination,description[:200],emoji[:8]))
+    return {"added":bool(cur.rowcount),"favorites":user_favorites(tid)}
+@app.delete("/api/favorites/{favorite_id}")
+def delete_favorite(favorite_id: int, x_telegram_init_data: Optional[str]=Header(default=None)):
+    u=telegram_user(x_telegram_init_data); tid=int(u["id"])
+    with db() as con: cur=con.execute("DELETE FROM favorites WHERE id=? AND telegram_id=?",(favorite_id,tid))
+    return {"deleted":bool(cur.rowcount),"favorites":user_favorites(tid)}
