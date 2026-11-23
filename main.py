@@ -12,7 +12,10 @@ app = FastAPI(title="EasyTrip API", version="0.2.0")
 app.add_middleware(CORSMiddleware, allow_origins=[x.strip() for x in ALLOWED_ORIGINS if x.strip()], allow_credentials=False, allow_methods=["GET", "POST", "DELETE"], allow_headers=["Content-Type", "X-Telegram-Init-Data"])
 
 def db():
-    con = sqlite3.connect(DB_PATH)
+    parent = os.path.dirname(DB_PATH)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    con = sqlite3.connect(DB_PATH, timeout=20)
     con.row_factory = sqlite3.Row
     return con
 
@@ -21,11 +24,12 @@ def init_db():
         con.execute("CREATE TABLE IF NOT EXISTS users(telegram_id INTEGER PRIMARY KEY, first_name TEXT, last_name TEXT, username TEXT, xp INTEGER NOT NULL DEFAULT 0, trips INTEGER NOT NULL DEFAULT 0, mission INTEGER NOT NULL DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)")
         con.execute("CREATE TABLE IF NOT EXISTS visited_countries(id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_id INTEGER NOT NULL, country TEXT NOT NULL, added_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(telegram_id,country))")
         con.execute("CREATE TABLE IF NOT EXISTS favorites(id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_id INTEGER NOT NULL, destination TEXT NOT NULL, description TEXT DEFAULT '', emoji TEXT DEFAULT '❤️', created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(telegram_id,destination))")
+        con.execute("CREATE TABLE IF NOT EXISTS stamps(id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_id INTEGER NOT NULL, stamp TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(telegram_id,stamp))")
 @app.on_event("startup")
 def startup(): init_db()
 
 def verify_telegram_init_data(init_data: str):
-    if not BOT_TOKEN: raise HTTPException(500, "Backend BOT_TOKEN is not configured")
+    if not BOT_TOKEN: raise HTTPException(503, "Backend BOT_TOKEN is not configured in Render Environment")
     try:
         parsed = dict(parse_qsl(init_data, keep_blank_values=True)); received_hash = parsed.pop("hash"); auth_date = int(parsed.get("auth_date", "0"))
     except Exception: raise HTTPException(401, "Invalid Telegram initData")
@@ -53,6 +57,8 @@ def user_countries(tid):
 
 def user_favorites(tid):
     with db() as con: return [dict(r) for r in con.execute("SELECT id,destination,description,emoji,created_at FROM favorites WHERE telegram_id=? ORDER BY created_at DESC",(tid,)).fetchall()]
+def user_stamps(tid):
+    with db() as con: return [r["stamp"] for r in con.execute("SELECT stamp FROM stamps WHERE telegram_id=? ORDER BY created_at",(tid,)).fetchall()]
 
 def level_for_xp(xp):
     levels=[("Новичок",0,"🧳"),("Турист",500,"✈️"),("Исследователь",1500,"🧭"),("Авантюрист",4000,"🎒"),("Легенда",10000,"👑")]
@@ -70,7 +76,28 @@ def health(): return {"status":"ok","service":"EasyTrip API"}
 def profile(x_telegram_init_data: Optional[str]=Header(default=None)):
     u=telegram_user(x_telegram_init_data); user=upsert_user(u); countries=user_countries(user["telegram_id"]); xp=user["xp"]
     favs=user_favorites(user["telegram_id"])
-    return {"user":{"id":user["telegram_id"],"first_name":user["first_name"],"last_name":user["last_name"],"username":user["username"]},"xp":xp,"trips":user["trips"],"mission":user["mission"],"visited":countries,"stampList":countries,"favorites":favs,"level":level_for_xp(xp)}
+    return {"user":{"id":user["telegram_id"],"first_name":user["first_name"],"last_name":user["last_name"],"username":user["username"]},"xp":xp,"trips":user["trips"],"mission":user["mission"],"visited":countries,"stampList":list(dict.fromkeys(countries+user_stamps(user["telegram_id"]))),"favorites":favs,"level":level_for_xp(xp)}
+@app.post("/api/stamps")
+def add_stamp(payload: dict, x_telegram_init_data: Optional[str]=Header(default=None)):
+    u=telegram_user(x_telegram_init_data); stamp=str(payload.get("stamp", "")).strip()
+    if not stamp or len(stamp)>100: raise HTTPException(400,"Stamp name is invalid")
+    tid=int(u["id"]); upsert_user(u)
+    with db() as con:
+        cur=con.execute("INSERT OR IGNORE INTO stamps(telegram_id,stamp) VALUES(?,?)",(tid,stamp))
+        if cur.rowcount: con.execute("UPDATE users SET xp=xp+100,updated_at=CURRENT_TIMESTAMP WHERE telegram_id=?",(tid,))
+        user=con.execute("SELECT xp FROM users WHERE telegram_id=?",(tid,)).fetchone()
+    return {"added":bool(cur.rowcount),"stamps":user_stamps(tid),"xp":user["xp"],"level":level_for_xp(user["xp"])}
+
+@app.post("/api/mission")
+def mission_progress(x_telegram_init_data: Optional[str]=Header(default=None)):
+    u=telegram_user(x_telegram_init_data); tid=int(u["id"]); upsert_user(u)
+    with db() as con:
+        row=con.execute("SELECT mission FROM users WHERE telegram_id=?",(tid,)).fetchone()
+        mission=min(3,int(row["mission"])+1)
+        if mission>int(row["mission"]): con.execute("UPDATE users SET mission=?,xp=xp+25,updated_at=CURRENT_TIMESTAMP WHERE telegram_id=?",(mission,tid))
+        user=con.execute("SELECT mission,xp FROM users WHERE telegram_id=?",(tid,)).fetchone()
+    return {"mission":user["mission"],"xp":user["xp"],"level":level_for_xp(user["xp"])}
+
 @app.post("/api/countries")
 def add_country(payload: CountryPayload, x_telegram_init_data: Optional[str]=Header(default=None)):
     u=telegram_user(x_telegram_init_data); name=payload.country.strip()

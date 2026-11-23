@@ -1,19 +1,35 @@
-# EasyTrip API — первый backend
+# EasyTrip backend + Mini App (обновлённая версия)
 
-## Что умеет
-- Проверяет Telegram Mini App `initData` подписью с токеном бота.
-- Создаёт/обновляет профиль Telegram-пользователя.
-- Хранит профиль, XP и посещённые страны в SQLite.
-- `GET /health` — проверка сервиса.
-- `GET /api/profile` — профиль пользователя (требует `X-Telegram-Init-Data`).
-- `POST /api/countries` — добавление страны (требует Telegram initData).
+## Что синхронизируется с сервером
+- Telegram-профиль пользователя
+- XP и уровень
+- Посещённые страны
+- Полученные штампы (теперь сохраняются отдельно и не пропадают после перезапуска Mini App)
+- Прогресс задания недели (до 3 отметок)
+- Избранные направления: добавление и удаление
 
-## Размещение на Render
-1. Создай GitHub-репозиторий для backend или загрузи папку `backend` в репозиторий EasyTrip.
-2. На Render выбери **New → Blueprint** и подключи репозиторий, в котором есть `backend/render.yaml`.
-3. При создании сервиса Render запросит `BOT_TOKEN`. Вставь токен из своего локального `.env` (никому его не отправляай и не коммить).
-4. Дождись статуса Live и проверь URL `/health`.
-5. Скопируй HTTPS URL сервиса. Его нужно вставить в `API_BASE` в `miniapp/index.html` вместо пустой строки.
-6. Commit/push обновлённый `miniapp/index.html` в GitHub Pages. После обновления открой Mini App заново.
+## API
+- `GET /health` — статус сервиса
+- `GET /api/profile` — профиль пользователя
+- `POST /api/countries` — добавить страну (+150 XP)
+- `POST /api/stamps` — получить штамп (+100 XP, защита от повторного начисления)
+- `POST /api/mission` — отметить прогресс задания (+25 XP, максимум 3)
+- `POST /api/xp?xp=...` — начислить XP (служебный endpoint)
+- `GET/POST /api/favorites` — избранное
+- `DELETE /api/favorites/{id}` — удалить из избранного
 
-SQLite размещена на persistent disk `/var/data/easytrip.db`. Если Render не предоставляет постоянный диск на выбранном тарифе, данные могут сбрасываться после перезапуска — обязательно проверь наличие диска в настройках.
+Все пользовательские API требуют заголовок `X-Telegram-Init-Data` и проверяют подпись Telegram.
+
+## Render
+В Render Environment должны быть:
+- `BOT_TOKEN` — токен бота (секрет, не коммитить)
+- `DATABASE_PATH` — `/var/data/easytrip.db`
+- `ALLOWED_ORIGINS` — origin GitHub Pages Mini App, без завершающего `/`
+
+В `render.yaml` настроен persistent disk `/var/data` (1 GB). Если тариф Render не поддерживает диск, SQLite будет временной и данные могут потеряться при redeploy.
+
+## Mini App
+Файл `easytrip-miniapp/index.html` — frontend. API URL задан в переменной `API` внутри файла.
+
+## Важно
+Проверена компиляция Python. Реальное Telegram-подключение, подпись initData и работа Render требуют теста в Telegram после deploy.
